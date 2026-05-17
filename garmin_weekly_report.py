@@ -9,7 +9,7 @@ Required environment variables (set as GitHub Actions Secrets):
     GMAIL_USER           — gmail address that sends the report
     GMAIL_APP_PASSWORD   — 16-char Google app password (NOT your real password)
     RECIPIENT_EMAIL      — where the report gets sent (can equal GMAIL_USER)
-    ANTHROPIC_API_KEY    — Claude API key for the Whoop-style analysis
+    GEMINI_API_KEY       — Google Gemini API key for the Whoop-style analysis (free tier)
 """
 
 import csv
@@ -23,7 +23,7 @@ from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
 
-import anthropic
+import google.generativeai as genai
 from garminconnect import (
     Garmin,
     GarminConnectAuthenticationError,
@@ -258,19 +258,16 @@ Tone rules:
 """
 
 
-def get_claude_analysis(data_summary: str) -> str:
-    client = anthropic.Anthropic(api_key=env("ANTHROPIC_API_KEY"))
-    message = client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=1800,
-        messages=[
-            {
-                "role": "user",
-                "content": ANALYSIS_PROMPT.format(data=data_summary),
-            }
-        ],
-    )
-    return message.content[0].text
+def get_gemini_analysis(data_summary: str) -> str:
+    genai.configure(api_key=env("GEMINI_API_KEY"))
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    response = model.generate_content(ANALYSIS_PROMPT.format(data=data_summary))
+    # Strip markdown code fences if Gemini wraps the HTML
+    text = response.text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1]
+        text = text.rsplit("```", 1)[0].strip()
+    return text
 
 
 # ---------- email ----------
@@ -283,7 +280,4 @@ def build_html_email(analysis_html: str, start: date, end: date) -> str:
 <style>
   body {{
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, sans-serif;
-    max-width: 620px; margin: 0 auto; padding: 20px;
-    color: #1a1a1a; background: #f4f4f5;
-  }}
- 
+    max-width: 
