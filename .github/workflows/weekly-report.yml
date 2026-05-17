@@ -28,4 +28,5 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python garmin_weekly_report.py
