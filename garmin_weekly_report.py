@@ -1,6 +1,6 @@
 """
 Garmin Weekly Report — pulls the last 7 days of health/activity data from
-Garmin Connect, runs it through Claude for a Whoop-style analysis, and emails
+Garmin Connect, runs it through Gemini for a Whoop-style analysis, and emails
 the full report to you. Runs every Sunday evening via GitHub Actions.
 
 Required environment variables (set as GitHub Actions Secrets):
@@ -9,7 +9,7 @@ Required environment variables (set as GitHub Actions Secrets):
     GMAIL_USER           — gmail address that sends the report
     GMAIL_APP_PASSWORD   — 16-char Google app password (NOT your real password)
     RECIPIENT_EMAIL      — where the report gets sent (can equal GMAIL_USER)
-    GEMINI_API_KEY       — Google Gemini API key for the Whoop-style analysis (free tier)
+    GEMINI_API_KEY       — Google Gemini API key (free tier)
 """
 
 import csv
@@ -34,7 +34,7 @@ from garminconnect import (
 
 # ---------- helpers ----------
 
-def env(name: str) -> str:
+def env(name):
     value = os.environ.get(name)
     if not value:
         sys.exit(f"Missing required env var: {name}")
@@ -60,13 +60,13 @@ def seconds_to_hm(seconds):
 
 # ---------- Garmin pulls ----------
 
-def login() -> Garmin:
+def login():
     client = Garmin(env("GARMIN_EMAIL"), env("GARMIN_PASSWORD"))
     client.login()
     return client
 
 
-def pull_week(client: Garmin, end: date):
+def pull_week(client, end):
     days = [end - timedelta(days=i) for i in range(6, -1, -1)]
     rows = []
 
@@ -142,7 +142,7 @@ def pull_week(client: Garmin, end: date):
 
 # ---------- CSV helpers ----------
 
-def daily_to_csv(rows) -> str:
+def daily_to_csv(rows):
     if not rows:
         return ""
     buf = io.StringIO()
@@ -152,7 +152,7 @@ def daily_to_csv(rows) -> str:
     return buf.getvalue()
 
 
-def activities_to_csv(acts) -> str:
+def activities_to_csv(acts):
     if not acts:
         return "no activities recorded\n"
     buf = io.StringIO()
@@ -162,9 +162,9 @@ def activities_to_csv(acts) -> str:
     return buf.getvalue()
 
 
-# ---------- data summary for Claude ----------
+# ---------- data summary for Gemini ----------
 
-def build_data_summary(rows, activities, start: date, end: date) -> str:
+def build_data_summary(rows, activities, start, end):
     def avg(field):
         vals = [r[field] for r in rows if r.get(field) is not None]
         return round(sum(vals) / len(vals), 1) if vals else None
@@ -213,7 +213,7 @@ def build_data_summary(rows, activities, start: date, end: date) -> str:
     return "\n".join(lines)
 
 
-# ---------- Claude analysis ----------
+# ---------- Gemini analysis ----------
 
 ANALYSIS_PROMPT = """You are an elite performance coach writing a weekly health debrief.
 The athlete uses a Garmin watch. Here is their raw data for the past 7 days:
@@ -222,47 +222,41 @@ The athlete uses a Garmin watch. Here is their raw data for the past 7 days:
 
 Write a punchy, Whoop-style weekly report in HTML. Use exactly this structure:
 
-<h2>📋 Week in One Line</h2>
-<p><strong>[One bold sentence that captures the overall shape of the week — training load, recovery quality, standout moments. Be specific, not generic.]</strong></p>
+<h2>Week in One Line</h2>
+<p><strong>[One bold sentence capturing the overall shape of the week. Be specific.]</strong></p>
 
-<h2>🏆 What You Crushed</h2>
+<h2>What You Crushed</h2>
 <ul>
-  <li><strong>[Win title]:</strong> [1–2 sentences referencing the actual number and why it matters.]</li>
-  <li>... (3 wins total)</li>
+  <li><strong>[Win title]:</strong> [1-2 sentences referencing actual numbers.]</li>
+  [3 wins total]
 </ul>
 
-<h2>📊 Numbers at a Glance</h2>
+<h2>Numbers at a Glance</h2>
 <table>
   <tr><th>Metric</th><th>This Week</th><th>What It Means</th></tr>
-  <tr><td>Sleep Score</td><td>[value]</td><td>[1 short phrase]</td></tr>
-  <tr><td>HRV</td><td>[value] ms</td><td>[1 short phrase]</td></tr>
-  <tr><td>Resting HR</td><td>[value] bpm</td><td>[1 short phrase]</td></tr>
-  <tr><td>Intensity Minutes</td><td>[value]</td><td>[1 short phrase]</td></tr>
+  <tr><td>Sleep Score</td><td>[value]</td><td>[short phrase]</td></tr>
+  <tr><td>HRV</td><td>[value] ms</td><td>[short phrase]</td></tr>
+  <tr><td>Resting HR</td><td>[value] bpm</td><td>[short phrase]</td></tr>
+  <tr><td>Intensity Minutes</td><td>[value]</td><td>[short phrase]</td></tr>
 </table>
 
-<h2>🎯 5 Focus Areas for Next Week</h2>
+<h2>5 Focus Areas for Next Week</h2>
 <ol>
-  <li><strong>[Action-oriented title]:</strong> [What the data shows + one specific, concrete action. 2 sentences max.]</li>
-  ... (5 items total)
+  <li><strong>[Action title]:</strong> [What data shows + one concrete action. 2 sentences.]</li>
+  [5 items total]
 </ol>
 
-<h2>💡 Coach's Take</h2>
-<p>[2–3 sentences. The single most important thing to work on and why — written like a coach who genuinely cares. Direct, warm, no fluff.]</p>
+<h2>Coach's Take</h2>
+<p>[2-3 sentences. Most important thing to work on and why. Direct and warm.]</p>
 
-Tone rules:
-- Energetic and direct, like Whoop or a great personal trainer
-- Always reference specific numbers to make it feel personal
-- Honest about weak spots but frame improvements as opportunities, not failures
-- No corporate language, no "it is important to note", no hedging
-- Keep HTML clean — only use the tags shown above
-"""
+Rules: energetic and direct, reference specific numbers, honest but encouraging, no fluff.
+Output only the HTML fragment above — no markdown fences, no extra commentary."""
 
 
-def get_gemini_analysis(data_summary: str) -> str:
+def get_gemini_analysis(data_summary):
     genai.configure(api_key=env("GEMINI_API_KEY"))
     model = genai.GenerativeModel("gemini-1.5-flash")
     response = model.generate_content(ANALYSIS_PROMPT.format(data=data_summary))
-    # Strip markdown code fences if Gemini wraps the HTML
     text = response.text.strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[-1]
@@ -272,12 +266,126 @@ def get_gemini_analysis(data_summary: str) -> str:
 
 # ---------- email ----------
 
-def build_html_email(analysis_html: str, start: date, end: date) -> str:
-    return f"""<!DOCTYPE html>
+HTML_TEMPLATE = """\
+<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <style>
-  body {{
+  body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, sans-serif;
-    max-width: 
+    max-width: 620px; margin: 0 auto; padding: 20px;
+    color: #1a1a1a; background: #f4f4f5;
+  }
+  .header {
+    background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 100%);
+    color: white; border-radius: 14px;
+    padding: 28px 32px; margin-bottom: 16px;
+  }
+  .header h1 { margin: 0; font-size: 24px; font-weight: 800; letter-spacing: -0.5px; }
+  .header p { margin: 6px 0 0; font-size: 13px; color: #93c5fd; }
+  .card {
+    background: white; border-radius: 14px; padding: 28px 32px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.07); margin-bottom: 12px;
+  }
+  h2 {
+    font-size: 16px; font-weight: 700; margin: 20px 0 12px;
+    padding-bottom: 8px; border-bottom: 2px solid #f1f5f9; color: #0f172a;
+  }
+  h2:first-child { margin-top: 0; }
+  p { font-size: 14px; line-height: 1.65; margin: 0 0 12px; }
+  ul, ol { padding-left: 20px; margin: 0 0 12px; }
+  li { margin-bottom: 10px; line-height: 1.55; font-size: 14px; }
+  strong { color: #0f172a; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 4px 0 12px; }
+  th {
+    background: #f8fafc; text-align: left; padding: 9px 12px;
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: #64748b; border-bottom: 1px solid #e2e8f0;
+  }
+  td { padding: 10px 12px; border-bottom: 1px solid #f1f5f9; vertical-align: top; }
+  td:nth-child(2) { font-weight: 700; color: #0f172a; }
+  td:nth-child(3) { color: #64748b; font-size: 12px; }
+  .footer { font-size: 11px; color: #94a3b8; text-align: center; padding: 12px; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1>&#127939; Weekly Performance Report</h1>
+    <p>{date_range}</p>
+  </div>
+  <div class="card">
+    {analysis}
+  </div>
+  <div class="footer">
+    Raw data attached as CSV &nbsp;&middot;&nbsp; Runs automatically every Sunday at 7 PM EAT
+  </div>
+</body>
+</html>"""
+
+
+def build_html_email(analysis_html, start, end):
+    date_range = f"{start.strftime('%B %d')} — {end.strftime('%B %d, %Y')}"
+    return HTML_TEMPLATE.format(date_range=date_range, analysis=analysis_html)
+
+
+def send_email(subject, html_body, attachments):
+    msg = MIMEMultipart("mixed")
+    msg["Subject"] = subject
+    msg["From"] = env("GMAIL_USER")
+    msg["To"] = env("RECIPIENT_EMAIL")
+
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText("Your weekly Garmin performance report is ready.", "plain"))
+    alt.attach(MIMEText(html_body, "html"))
+    msg.attach(alt)
+
+    for filename, content in attachments:
+        part = MIMEBase("text", "csv")
+        part.set_payload(content.encode("utf-8"))
+        encoders.encode_base64(part)
+        part.add_header("Content-Disposition", "attachment", filename=filename)
+        msg.attach(part)
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(env("GMAIL_USER"), env("GMAIL_APP_PASSWORD"))
+        smtp.sendmail(env("GMAIL_USER"), env("RECIPIENT_EMAIL"), msg.as_string())
+
+
+# ---------- main ----------
+
+def main():
+    end = date.today()
+    start = end - timedelta(days=6)
+    print(f"Pulling Garmin data {start} -> {end}")
+
+    try:
+        client = login()
+    except (GarminConnectAuthenticationError, GarminConnectConnectionError,
+            GarminConnectTooManyRequestsError) as e:
+        sys.exit(f"Garmin login failed: {e}")
+
+    rows, activities = pull_week(client, end)
+    data_summary = build_data_summary(rows, activities, start, end)
+    daily_csv = daily_to_csv(rows)
+    activities_csv = activities_to_csv(activities)
+
+    print("Running Gemini analysis...")
+    analysis_html = get_gemini_analysis(data_summary)
+
+    html_body = build_html_email(analysis_html, start, end)
+    subject = f"\U0001f3c3 Weekly Report — {start.strftime('%b %d')} to {end.strftime('%b %d, %Y')}"
+
+    send_email(
+        subject,
+        html_body,
+        attachments=[
+            ("daily_metrics.csv", daily_csv),
+            ("activities.csv", activities_csv),
+        ],
+    )
+    print("Email sent.")
+
+
+if __name__ == "__main__":
+    main()
