@@ -1,7 +1,7 @@
 """
 Garmin Weekly Report — pulls the last 7 days of health/activity data from
-Garmin Connect, formats it into a clean markdown + CSV summary, and emails
-it to you. Designed to run on a Sunday evening schedule via GitHub Actions.
+Garmin Connect, runs it through Claude for a Whoop-style analysis, and emails
+the full report to you. Runs every Sunday evening via GitHub Actions.
 
 Required environment variables (set as GitHub Actions Secrets):
     GARMIN_EMAIL         — your Garmin Connect login email
@@ -9,6 +9,7 @@ Required environment variables (set as GitHub Actions Secrets):
     GMAIL_USER           — gmail address that sends the report
     GMAIL_APP_PASSWORD   — 16-char Google app password (NOT your real password)
     RECIPIENT_EMAIL      — where the report gets sent (can equal GMAIL_USER)
+    ANTHROPIC_API_KEY    — Claude API key for the Whoop-style analysis
 """
 
 import csv
@@ -16,9 +17,13 @@ import io
 import os
 import smtplib
 import sys
-from datetime import date, datetime, timedelta
-from email.message import EmailMessage
+from datetime import date, timedelta
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
 
+import anthropic
 from garminconnect import (
     Garmin,
     GarminConnectAuthenticationError,
@@ -37,7 +42,6 @@ def env(name: str) -> str:
 
 
 def safe_get(d, *keys, default=None):
-    """Walk a nested dict safely; return default if any key is missing/None."""
     cur = d
     for k in keys:
         if cur is None or not isinstance(cur, dict):
@@ -63,7 +67,6 @@ def login() -> Garmin:
 
 
 def pull_week(client: Garmin, end: date):
-    """Pull 7 days ending on `end` (inclusive)."""
     days = [end - timedelta(days=i) for i in range(6, -1, -1)]
     rows = []
 
@@ -71,7 +74,6 @@ def pull_week(client: Garmin, end: date):
         iso = d.isoformat()
         row = {"date": iso, "weekday": d.strftime("%a")}
 
-        # --- Sleep ---
         try:
             sleep = client.get_sleep_data(iso)
             dto = safe_get(sleep, "dailySleepDTO", default={})
@@ -81,14 +83,10 @@ def pull_week(client: Garmin, end: date):
             row["light_seconds"] = safe_get(dto, "lightSleepSeconds")
             row["rem_seconds"] = safe_get(dto, "remSleepSeconds")
             row["awake_seconds"] = safe_get(dto, "awakeSleepSeconds")
-            row["avg_overnight_hr"] = safe_get(dto, "averageSpO2HRSleep") or safe_get(
-                sleep, "restingHeartRate"
-            )
             row["avg_overnight_hrv"] = safe_get(dto, "avgOvernightHrv")
         except Exception as e:
             print(f"  sleep pull failed for {iso}: {e}")
 
-        # --- Steps / stress / Body Battery / RHR via daily summary ---
         try:
             stats = client.get_stats(iso)
             row["steps"] = stats.get("totalSteps")
@@ -104,7 +102,6 @@ def pull_week(client: Garmin, end: date):
         except Exception as e:
             print(f"  stats pull failed for {iso}: {e}")
 
-        # --- HRV status ---
         try:
             hrv = client.get_hrv_data(iso)
             row["hrv_weekly_avg"] = safe_get(hrv, "hrvSummary", "weeklyAvg")
@@ -112,7 +109,6 @@ def pull_week(client: Garmin, end: date):
         except Exception as e:
             print(f"  hrv pull failed for {iso}: {e}")
 
-        # --- Training readiness (if available) ---
         try:
             readiness = client.get_training_readiness(iso)
             if readiness and isinstance(readiness, list) and readiness:
@@ -122,7 +118,6 @@ def pull_week(client: Garmin, end: date):
 
         rows.append(row)
 
-    # --- Activities for the week ---
     activities = []
     try:
         start_iso = days[0].isoformat()
@@ -145,7 +140,7 @@ def pull_week(client: Garmin, end: date):
     return rows, activities
 
 
-# ---------- formatting ----------
+# ---------- CSV helpers ----------
 
 def daily_to_csv(rows) -> str:
     if not rows:
@@ -167,124 +162,128 @@ def activities_to_csv(acts) -> str:
     return buf.getvalue()
 
 
-def build_markdown_summary(rows, activities, start: date, end: date) -> str:
-    def avg(field, scale=1):
+# ---------- data summary for Claude ----------
+
+def build_data_summary(rows, activities, start: date, end: date) -> str:
+    def avg(field):
         vals = [r[field] for r in rows if r.get(field) is not None]
-        return round(sum(vals) / len(vals) / scale, 1) if vals else None
+        return round(sum(vals) / len(vals), 1) if vals else None
 
     def total(field):
         vals = [r[field] for r in rows if r.get(field) is not None]
         return sum(vals) if vals else 0
 
-    md = []
-    md.append(f"# Garmin Weekly Report — {start.isoformat()} to {end.isoformat()}\n")
-    md.append("## Weekly Averages\n")
-    md.append(f"- **Sleep score (avg):** {avg('sleep_score')}")
-    md.append(f"- **Sleep duration (avg):** {seconds_to_hm(avg('sleep_seconds'))}")
-    md.append(f"- **Resting HR (avg):** {avg('resting_hr')} bpm")
-    md.append(f"- **HRV weekly avg:** {avg('hrv_weekly_avg')} ms")
-    md.append(f"- **Stress (avg):** {avg('avg_stress')}")
-    md.append(f"- **Steps (avg):** {avg('steps')}")
-    md.append(f"- **Steps (total):** {total('steps'):,}")
-    md.append(f"- **Intensity minutes (total):** {total('intensity_minutes')}\n")
+    lines = [f"Week: {start.isoformat()} to {end.isoformat()}\n"]
+    lines.append("WEEKLY AVERAGES")
+    lines.append(f"Sleep score: {avg('sleep_score')}")
+    lines.append(f"Sleep duration: {seconds_to_hm(avg('sleep_seconds'))}")
+    lines.append(f"Resting HR: {avg('resting_hr')} bpm")
+    lines.append(f"HRV weekly avg: {avg('hrv_weekly_avg')} ms")
+    lines.append(f"Stress: {avg('avg_stress')}")
+    lines.append(f"Steps/day: {avg('steps')}")
+    lines.append(f"Total steps: {total('steps'):,}")
+    lines.append(f"Total intensity minutes: {total('intensity_minutes')}\n")
 
-    md.append("## Daily Breakdown\n")
-    md.append("| Day | Date | Sleep | Score | RHR | HRV | Stress | Steps | BB High/Low |")
-    md.append("|---|---|---|---|---|---|---|---|---|")
+    lines.append("DAILY BREAKDOWN")
+    lines.append("Day | Date | Sleep | Score | RHR | HRV | Stress | Steps | BB High/Low")
     for r in rows:
-        md.append(
-            f"| {r['weekday']} | {r['date']} | "
+        lines.append(
+            f"{r['weekday']} | {r['date']} | "
             f"{seconds_to_hm(r.get('sleep_seconds'))} | "
             f"{r.get('sleep_score') or '—'} | "
             f"{r.get('resting_hr') or '—'} | "
             f"{r.get('avg_overnight_hrv') or r.get('hrv_weekly_avg') or '—'} | "
             f"{r.get('avg_stress') or '—'} | "
             f"{r.get('steps') or '—'} | "
-            f"{r.get('body_battery_high') or '—'}/{r.get('body_battery_low') or '—'} |"
+            f"{r.get('body_battery_high') or '—'}/{r.get('body_battery_low') or '—'}"
         )
 
-    md.append("\n## Activities\n")
+    lines.append("\nACTIVITIES")
     if not activities:
-        md.append("_No activities recorded._")
+        lines.append("No activities recorded.")
     else:
-        md.append("| Date | Type | Distance (km) | Duration (min) | Avg HR | Max HR |")
-        md.append("|---|---|---|---|---|---|")
         for a in activities:
-            md.append(
-                f"| {a['date']} | {a.get('type') or '—'} | "
-                f"{a.get('distance_km') or '—'} | "
-                f"{a.get('duration_min') or '—'} | "
-                f"{a.get('avg_hr') or '—'} | "
-                f"{a.get('max_hr') or '—'} |"
+            dist = f"{a['distance_km']} km" if a.get("distance_km") else ""
+            lines.append(
+                f"{a['date']} — {a.get('type', '—')} | "
+                f"{dist} | {a.get('duration_min')} min | "
+                f"Avg HR {a.get('avg_hr') or '—'} | Max HR {a.get('max_hr') or '—'}"
             )
 
-    md.append(
-        "\n---\n*Forward this to Claude and ask for a Whoop-style summary: "
-        "what you did well + main areas to improve and how.*"
+    return "\n".join(lines)
+
+
+# ---------- Claude analysis ----------
+
+ANALYSIS_PROMPT = """You are an elite performance coach writing a weekly health debrief.
+The athlete uses a Garmin watch. Here is their raw data for the past 7 days:
+
+{data}
+
+Write a punchy, Whoop-style weekly report in HTML. Use exactly this structure:
+
+<h2>📋 Week in One Line</h2>
+<p><strong>[One bold sentence that captures the overall shape of the week — training load, recovery quality, standout moments. Be specific, not generic.]</strong></p>
+
+<h2>🏆 What You Crushed</h2>
+<ul>
+  <li><strong>[Win title]:</strong> [1–2 sentences referencing the actual number and why it matters.]</li>
+  <li>... (3 wins total)</li>
+</ul>
+
+<h2>📊 Numbers at a Glance</h2>
+<table>
+  <tr><th>Metric</th><th>This Week</th><th>What It Means</th></tr>
+  <tr><td>Sleep Score</td><td>[value]</td><td>[1 short phrase]</td></tr>
+  <tr><td>HRV</td><td>[value] ms</td><td>[1 short phrase]</td></tr>
+  <tr><td>Resting HR</td><td>[value] bpm</td><td>[1 short phrase]</td></tr>
+  <tr><td>Intensity Minutes</td><td>[value]</td><td>[1 short phrase]</td></tr>
+</table>
+
+<h2>🎯 5 Focus Areas for Next Week</h2>
+<ol>
+  <li><strong>[Action-oriented title]:</strong> [What the data shows + one specific, concrete action. 2 sentences max.]</li>
+  ... (5 items total)
+</ol>
+
+<h2>💡 Coach's Take</h2>
+<p>[2–3 sentences. The single most important thing to work on and why — written like a coach who genuinely cares. Direct, warm, no fluff.]</p>
+
+Tone rules:
+- Energetic and direct, like Whoop or a great personal trainer
+- Always reference specific numbers to make it feel personal
+- Honest about weak spots but frame improvements as opportunities, not failures
+- No corporate language, no "it is important to note", no hedging
+- Keep HTML clean — only use the tags shown above
+"""
+
+
+def get_claude_analysis(data_summary: str) -> str:
+    client = anthropic.Anthropic(api_key=env("ANTHROPIC_API_KEY"))
+    message = client.messages.create(
+        model="claude-opus-4-5",
+        max_tokens=1800,
+        messages=[
+            {
+                "role": "user",
+                "content": ANALYSIS_PROMPT.format(data=data_summary),
+            }
+        ],
     )
-    return "\n".join(md)
+    return message.content[0].text
 
 
 # ---------- email ----------
 
-def send_email(subject, body, attachments):
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = env("GMAIL_USER")
-    msg["To"] = env("RECIPIENT_EMAIL")
-    msg.set_content(body)
-
-    for filename, content in attachments:
-        msg.add_attachment(
-            content.encode("utf-8"),
-            maintype="text",
-            subtype="csv" if filename.endswith(".csv") else "markdown",
-            filename=filename,
-        )
-
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-        smtp.login(env("GMAIL_USER"), env("GMAIL_APP_PASSWORD"))
-        smtp.send_message(msg)
-
-
-# ---------- main ----------
-
-def main():
-    end = date.today()
-    start = end - timedelta(days=6)
-    print(f"Pulling Garmin data {start} → {end}")
-
-    try:
-        client = login()
-    except (GarminConnectAuthenticationError, GarminConnectConnectionError,
-            GarminConnectTooManyRequestsError) as e:
-        sys.exit(f"Garmin login failed: {e}")
-
-    rows, activities = pull_week(client, end)
-    markdown = build_markdown_summary(rows, activities, start, end)
-    daily_csv = daily_to_csv(rows)
-    activities_csv = activities_to_csv(activities)
-
-    subject = f"Garmin Weekly Report — {start} to {end}"
-    body = (
-        "Your weekly Garmin data is attached.\n\n"
-        "Forward the markdown to Claude and ask for the Whoop-style report:\n"
-        "  \"Here's my weekly Garmin data — give me a summary of what I did well "
-        "and the main areas to improve, including how.\"\n\n"
-        "Summary preview:\n\n" + markdown[:1500] + "\n..."
-    )
-
-    send_email(
-        subject,
-        body,
-        attachments=[
-            ("weekly_summary.md", markdown),
-            ("daily_metrics.csv", daily_csv),
-            ("activities.csv", activities_csv),
-        ],
-    )
-    print("Email sent.")
-
-
-if __name__ == "__main__":
-    main()
+def build_html_email(analysis_html: str, start: date, end: date) -> str:
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, sans-serif;
+    max-width: 620px; margin: 0 auto; padding: 20px;
+    color: #1a1a1a; background: #f4f4f5;
+  }}
+ 
