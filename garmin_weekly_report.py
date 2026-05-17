@@ -255,7 +255,7 @@ Output only the HTML fragment above — no markdown fences, no extra commentary.
 
 def get_gemini_analysis(data_summary):
     genai.configure(api_key=env("GEMINI_API_KEY"))
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = genai.GenerativeModel("gemini-2.0-flash")
     response = model.generate_content(ANALYSIS_PROMPT.format(data=data_summary))
     text = response.text.strip()
     if text.startswith("```"):
