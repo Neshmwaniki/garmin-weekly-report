@@ -253,15 +253,25 @@ Rules: energetic and direct, reference specific numbers, honest but encouraging,
 Output only the HTML fragment above — no markdown fences, no extra commentary."""
 
 
+import time
+
 def get_gemini_analysis(data_summary):
     genai.configure(api_key=env("GEMINI_API_KEY"))
-    model = genai.GenerativeModel("gemini-2.0-flash")
-    response = model.generate_content(ANALYSIS_PROMPT.format(data=data_summary))
-    text = response.text.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1]
-        text = text.rsplit("```", 1)[0].strip()
-    return text
+    model = genai.GenerativeModel("gemini-2.0-flash-lite")
+    for attempt in range(3):
+        try:
+            response = model.generate_content(ANALYSIS_PROMPT.format(data=data_summary))
+            text = response.text.strip()
+            if text.startswith("```"):
+                text = text.split("\n", 1)[-1]
+                text = text.rsplit("```", 1)[0].strip()
+            return text
+        except Exception as e:
+            if attempt < 2:
+                print(f"Gemini API error (attempt {attempt+1}): {e}. Retrying in 60s...")
+                time.sleep(60)
+            else:
+                raise
 
 
 # ---------- email ----------
