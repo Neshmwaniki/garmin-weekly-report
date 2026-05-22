@@ -230,6 +230,13 @@ Output only the HTML fragment above, no markdown fences, no extra commentary."""
 def get_gemini_analysis(data_summary):
     """Call Gemini API using the new google-genai SDK with retry on quota errors."""
     client = genai.Client(api_key=env("GEMINI_API_KEY"))
+    try:
+        print("Listing models...")
+        for m in client.models.list():
+            print(f"  - {m.name}")
+    except Exception as le:
+        print("List models error:", le)
+
     last_exc = None
     for attempt in range(3):
         try:
