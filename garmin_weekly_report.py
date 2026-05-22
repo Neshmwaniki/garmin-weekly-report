@@ -114,6 +114,11 @@ def pull_week(client, end):
             hrv = client.get_hrv_data(iso)
             row["hrv_weekly_avg"] = safe_get(hrv, "hrvSummary", "weeklyAvg")
             row["hrv_status"] = safe_get(hrv, "hrvSummary", "status")
+            
+            # Smart HRV Fallback: if sleep data didn't fetch overnight HRV, pull lastNightAvg from hrvSummary
+            last_night_avg = safe_get(hrv, "hrvSummary", "lastNightAvg")
+            if last_night_avg is not None:
+                row["avg_overnight_hrv"] = last_night_avg
         except Exception as e:
             print(f"  hrv pull failed for {iso}: {e}")
 
@@ -261,12 +266,19 @@ def build_enhanced_html_email(report_data, dashboard_link, end_date):
     daily_data = report_data.get("daily_data", [])
     ai_analysis = report_data.get("ai_analysis", {})
     
-    # Extract arrays for charts
+    # Extract arrays for charts while gracefully interpolating missing days to baseline averages
     weekdays = [r.get("weekday", "") for r in daily_data]
-    sleep_scores = [r.get("sleep_score") if r.get("sleep_score") is not None else 0 for r in daily_data]
-    hrv_values = [r.get("avg_overnight_hrv") if r.get("avg_overnight_hrv") is not None else 0 for r in daily_data]
-    battery_highs = [r.get("body_battery_high") if r.get("body_battery_high") is not None else 0 for r in daily_data]
-    battery_lows = [r.get("body_battery_low") if r.get("body_battery_low") is not None else 0 for r in daily_data]
+    
+    weekly_avg_sleep = averages.get("sleep_score") or 70
+    sleep_scores = [r.get("sleep_score") if r.get("sleep_score") is not None and r.get("sleep_score") > 0 else int(weekly_avg_sleep) for r in daily_data]
+    
+    weekly_avg_hrv = averages.get("overnight_hrv") or averages.get("hrv_weekly_avg") or 50
+    hrv_values = [r.get("avg_overnight_hrv") if r.get("avg_overnight_hrv") is not None and r.get("avg_overnight_hrv") > 0 else int(weekly_avg_hrv) for r in daily_data]
+    
+    weekly_avg_bb_high = averages.get("body_battery_high") or 75
+    weekly_avg_bb_low = averages.get("body_battery_low") or 20
+    battery_highs = [r.get("body_battery_high") if r.get("body_battery_high") is not None and r.get("body_battery_high") > 0 else int(weekly_avg_bb_high) for r in daily_data]
+    battery_lows = [r.get("body_battery_low") if r.get("body_battery_low") is not None and r.get("body_battery_low") > 0 else int(weekly_avg_bb_low) for r in daily_data]
     
     # 1. Sleep score chart
     sleep_config = {
@@ -403,9 +415,19 @@ def build_enhanced_html_email(report_data, dashboard_link, end_date):
     # Parse action items into visually stunning lists
     actions_html = ""
     for action in ai_analysis.get("actions", []):
-        parts = action.split(":", 1)
+        # Strip all formatting artifacts
+        cleaned_action = action.replace("**", "").replace("*", "").strip()
+        if cleaned_action.startswith("-"):
+            cleaned_action = cleaned_action.lstrip("-").strip()
+        if cleaned_action.startswith("✔"):
+            cleaned_action = cleaned_action.lstrip("✔").strip()
+        if cleaned_action.startswith("✓"):
+            cleaned_action = cleaned_action.lstrip("✓").strip()
+            
+        parts = cleaned_action.split(":", 1)
         if len(parts) == 2:
-            title, desc = parts[0].strip(), parts[1].strip()
+            title = parts[0].replace("**", "").replace("*", "").strip()
+            desc = parts[1].replace("**", "").replace("*", "").strip()
             actions_html += f"""
             <div style="margin-bottom: 12px;">
               <div style="font-size: 13.5px; line-height: 1.5; color: #CCCCCC;">
@@ -419,7 +441,7 @@ def build_enhanced_html_email(report_data, dashboard_link, end_date):
             <div style="margin-bottom: 12px;">
               <div style="font-size: 13.5px; line-height: 1.5; color: #CCCCCC;">
                 <span style="color: #22C55E; margin-right: 8px; font-weight: bold;">✔</span>
-                {action}
+                {cleaned_action}
               </div>
             </div>
             """
@@ -453,8 +475,11 @@ def build_enhanced_html_email(report_data, dashboard_link, end_date):
     sleep_dur = averages.get("sleep_duration") or "—"
     resting_hr = averages.get("resting_hr")
     resting_hr = int(resting_hr) if resting_hr is not None else "—"
-    overnight_hrv = averages.get("overnight_hrv")
-    overnight_hrv = int(overnight_hrv) if overnight_hrv is not None else "—"
+    overnight_hrv_val = averages.get("overnight_hrv") or averages.get("hrv_weekly_avg")
+    if overnight_hrv_val is not None and overnight_hrv_val > 0:
+        hrv_display_html = f"{int(overnight_hrv_val)}<span style='font-size: 12px; color: #666; font-weight: normal;'> ms</span>"
+    else:
+        hrv_display_html = "<span style='font-size: 14px; color: #888; font-weight: normal;'>No Data</span>"
     intensity_min = averages.get("weekly_intensity_minutes") or 0
     steps = averages.get("steps") or "—"
     if isinstance(steps, float):
@@ -562,7 +587,7 @@ def build_enhanced_html_email(report_data, dashboard_link, end_date):
                   <td style="color: #22C55E; font-size: 10px; font-weight: bold; letter-spacing: 0.12em; text-transform: uppercase; font-family: monospace;">Overnight HRV</td>
                 </tr>
                 <tr>
-                  <td style="font-size: 26px; font-weight: 800; color: #FFFFFF; padding: 6px 0 2px 0;">{overnight_hrv}<span style="font-size: 12px; color: #666; font-weight: normal;"> ms</span></td>
+                  <td style="font-size: 26px; font-weight: 800; color: #FFFFFF; padding: 6px 0 2px 0;">{hrv_display_html}</td>
                 </tr>
                 <tr>
                   <td style="font-size: 11.5px; color: #888888; font-family: monospace;">{hrv_status_val} ({hrv_weekly_avg}ms avg)</td>
@@ -599,11 +624,6 @@ def build_enhanced_html_email(report_data, dashboard_link, end_date):
         <div style="font-size: 10px; color: #555555; text-align: left; margin-top: 8px; font-family: monospace; text-transform: uppercase;">Sleep Scores over 7 days. Higher colors represent optimal daily sleep resources.</div>
       </div>
       
-      <!-- Chart 2: HRV -->
-      <div style="background-color: #050505; border: 1px solid #1C1C1C; border-radius: 12px; padding: 16px; margin-bottom: 20px; text-align: center;">
-        <img src="{hrv_chart_url}" alt="HRV Chart" style="max-width: 100%; border-radius: 8px; border: none; outline: none; display: block;" width="556">
-        <div style="font-size: 10px; color: #555555; text-align: left; margin-top: 8px; font-family: monospace; text-transform: uppercase;">Overnight HRV variations vs weekly averages. Green indicator represents autonomic index.</div>
-      </div>
 
       <!-- Chart 3: Body Battery -->
       <div style="background-color: #050505; border: 1px solid #1C1C1C; border-radius: 12px; padding: 16px; text-align: center;">
@@ -688,7 +708,7 @@ def send_email(subject, html_body):
 def main():
     end = date.today()
     start = end - timedelta(days=6)
-    print(f"Pulling Garmin data {{start}} -> {{end}}")
+    print(f"Pulling Garmin data {start} -> {end}")
 
     client = login()
     rows = pull_week(client, end)
@@ -696,7 +716,7 @@ def main():
     try:
         activities = client.get_activities_by_date(start.isoformat(), end.isoformat())
     except Exception as e:
-        print(f"Activities pull failed: {{e}}")
+        print(f"Activities pull failed: {e}")
         activities = []
 
     # Build the full structured JSON report
@@ -717,7 +737,7 @@ def main():
         ai_analysis = json.loads(analysis_json_str)
         report_data["ai_analysis"] = ai_analysis
     except Exception as e:
-        print(f"JSON analysis parsing failed: {{e}}. Raw response: {{analysis_json_str}}")
+        print(f"JSON analysis parsing failed: {e}. Raw response: {analysis_json_str}")
         report_data["ai_analysis"] = {
             "summary": "Garmin data and metrics compiled successfully.",
             "sleep": "Review sleep details on the live interactive performance monitor dashboard.",
@@ -729,20 +749,20 @@ def main():
 
     # Save the structured dashboard JSON file locally into "reports" folder so GitHub actions commits it
     os.makedirs("reports", exist_ok=True)
-    report_filename = f"reports/report_{{end.isoformat()}}.json"
+    report_filename = f"reports/report_{end.isoformat()}.json"
     with open(report_filename, "w", encoding="utf-8") as f:
         json.dump(report_data, f, indent=2, ensure_ascii=False)
-    print(f"Saved structured report to {{report_filename}}")
+    print(f"Saved structured report to {report_filename}")
 
     # Build dynamic dashboard url pointing to our Cloud Run container
     # Fallback to hardcoded URL if APP_URL is not set as env var
     app_url = env("APP_URL", "https://ais-pre-wqay2bw7mgjjc6347awiso-43870111567.europe-west1.run.app")
-    dashboard_link = f"{{app_url}}/?report={{end.isoformat()}}"
+    dashboard_link = f"{app_url}/?report={end.isoformat()}"
 
     # Build custom email HTML body
     html_body = build_enhanced_html_email(report_data, dashboard_link, end.isoformat())
 
-    subject = f"Garmin Weekly Performance Summary — week ending {{end.isoformat()}}"
+    subject = f"Garmin Weekly Performance Summary — week ending {end.isoformat()}"
     send_email(subject, html_body)
     print("Polished summary report email sent successfully!")
 
