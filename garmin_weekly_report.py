@@ -11,6 +11,7 @@ import smtplib
 import sys
 import time
 import json
+import urllib.parse
 from datetime import date, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -177,7 +178,7 @@ def build_data_summary(rows, activities):
     }
     return summary
 
-# ---------- Gemini analysis ----------
+# ---------- Gemini analysis -----------
 
 ANALYSIS_PROMPT = """You are a personal health coach. Analyze the Garmin Connect fitness data below and generate a professional, structured weekly health report.
 You MUST return ONLY a valid, raw JSON object (with no markdown block wrapper, no extra comment text, no formatting fences) following this schema:
@@ -218,12 +219,16 @@ def get_gemini_analysis(data_summary_text):
                     contents=ANALYSIS_PROMPT.format(data=data_summary_text),
                 )
                 text = response.text.strip()
-                if text.startswith("```"):
-                    if text.startswith("```json"):
-                        text = text.split("```json", 1)[-1]
+                
+                # Use chr(96) dynamically to handle backticks cleanly without typescript template literal escape noise
+                BACKTICKS = chr(96) * 3
+                if text.startswith(BACKTICKS):
+                    if text.startswith(BACKTICKS + "json"):
+                        text = text.split(BACKTICKS + "json", 1)[-1]
                     else:
-                        text = text.split("```", 1)[-1]
-                    text = text.rsplit("```", 1)[0].strip()
+                        text = text.split(BACKTICKS, 1)[-1]
+                    text = text.rsplit(BACKTICKS, 1)[0].strip()
+                    
                 print(f"Success with model {model_name}!")
                 return text
             except Exception as e:
@@ -245,74 +250,431 @@ def get_gemini_analysis(data_summary_text):
                     
     raise last_exc
 
-# ---------- email ----------
+# ---------- email builders ----------
 
-HTML_EMAIL_TEMPLATE = """<!DOCTYPE html>
+def get_chart_url(config):
+    encoded = urllib.parse.quote(json.dumps(config))
+    return f"https://quickchart.io/chart?w=600&h=280&bkg=050505&c={encoded}"
+
+def build_enhanced_html_email(report_data, dashboard_link, end_date):
+    averages = report_data.get("averages", {})
+    daily_data = report_data.get("daily_data", [])
+    ai_analysis = report_data.get("ai_analysis", {})
+    
+    # Extract arrays for charts
+    weekdays = [r.get("weekday", "") for r in daily_data]
+    sleep_scores = [r.get("sleep_score") if r.get("sleep_score") is not None else 0 for r in daily_data]
+    hrv_values = [r.get("avg_overnight_hrv") if r.get("avg_overnight_hrv") is not None else 0 for r in daily_data]
+    battery_highs = [r.get("body_battery_high") if r.get("body_battery_high") is not None else 0 for r in daily_data]
+    battery_lows = [r.get("body_battery_low") if r.get("body_battery_low") is not None else 0 for r in daily_data]
+    
+    # 1. Sleep score chart
+    sleep_config = {
+        "type": "bar",
+        "data": {
+            "labels": weekdays,
+            "datasets": [{
+                "label": "Sleep Score",
+                "data": sleep_scores,
+                "backgroundColor": [
+                    "rgba(34, 197, 94, 0.85)" if s >= 80 else "rgba(249, 115, 22, 0.85)" if s >= 55 else "rgba(239, 68, 68, 0.85)"
+                    for s in sleep_scores
+                ],
+                "borderColor": [
+                    "#22C55E" if s >= 80 else "#F97316" if s >= 55 else "#EF4444"
+                    for s in sleep_scores
+                ],
+                "borderWidth": 1.5,
+                "borderRadius": 6,
+            }]
+        },
+        "options": {
+            "legend": {"display": False},
+            "title": {
+                "display": True,
+                "text": "WEEKLY SLEEP RESOURCE SCORES",
+                "fontColor": "#888888",
+                "fontSize": 11,
+                "fontFamily": "monospace"
+            },
+            "scales": {
+                "yAxes": [{
+                    "gridLines": {"color": "#1C1C1C", "zeroLineColor": "#1C1C1C"},
+                    "ticks": {"min": 0, "max": 100, "fontColor": "#666666", "fontSize": 10}
+                }],
+                "xAxes": [{
+                    "gridLines": {"display": False},
+                    "ticks": {"fontColor": "#FFFFFF", "fontSize": 10}
+                }]
+            }
+        }
+    }
+    sleep_chart_url = get_chart_url(sleep_config)
+    
+    # 2. HRV Line Chart
+    hrv_config = {
+        "type": "line",
+        "data": {
+            "labels": weekdays,
+            "datasets": [{
+                "label": "HRV ms",
+                "data": hrv_values,
+                "fill": True,
+                "backgroundColor": "rgba(34, 197, 94, 0.08)",
+                "borderColor": "#22C55E",
+                "borderWidth": 2.5,
+                "pointBackgroundColor": "#22C55E",
+                "pointRadius": 4,
+                "lineTension": 0.25
+            }]
+        },
+        "options": {
+            "legend": {"display": False},
+            "title": {
+                "display": True,
+                "text": "OVERNIGHT HEART RATE VARIABILITY (ms)",
+                "fontColor": "#888888",
+                "fontSize": 11,
+                "fontFamily": "monospace"
+            },
+            "scales": {
+                "yAxes": [{
+                    "gridLines": {"color": "#1C1C1C", "zeroLineColor": "#1C1C1C"},
+                    "ticks": {"fontColor": "#666666", "fontSize": 10}
+                }],
+                "xAxes": [{
+                    "gridLines": {"display": False},
+                    "ticks": {"fontColor": "#FFFFFF", "fontSize": 10}
+                }]
+            }
+        }
+    }
+    hrv_chart_url = get_chart_url(hrv_config)
+    
+    # 3. Body Battery Range Chart
+    battery_config = {
+        "type": "line",
+        "data": {
+            "labels": weekdays,
+            "datasets": [
+                {
+                    "label": "Peak Charge",
+                    "data": battery_highs,
+                    "borderColor": "#3B82F6",
+                    "backgroundColor": "transparent",
+                    "borderWidth": 2,
+                    "pointRadius": 3,
+                    "lineTension": 0.2
+                },
+                {
+                    "label": "Drain Point",
+                    "data": battery_lows,
+                    "borderColor": "#FF5733",
+                    "backgroundColor": "transparent",
+                    "borderWidth": 2,
+                    "pointRadius": 3,
+                    "lineTension": 0.2
+                }
+            ]
+        },
+        "options": {
+            "legend": {"labels": {"fontColor": "#888888", "fontSize": 9}, "align": "end"},
+            "title": {
+                "display": True,
+                "text": "DAILY BODY BATTERY CYCLES (HIGH VS LOW)",
+                "fontColor": "#888888",
+                "fontSize": 11,
+                "fontFamily": "monospace"
+            },
+            "scales": {
+                "yAxes": [{
+                    "gridLines": {"color": "#1C1C1C", "zeroLineColor": "#1C1C1C"},
+                    "ticks": {"min": 0, "max": 100, "fontColor": "#666666", "fontSize": 10}
+                }],
+                "xAxes": [{
+                    "gridLines": {"display": False},
+                    "ticks": {"fontColor": "#FFFFFF", "fontSize": 10}
+                }]
+            }
+        }
+    }
+    battery_chart_url = get_chart_url(battery_config)
+    
+    # Parse action items into visually stunning lists
+    actions_html = ""
+    for action in ai_analysis.get("actions", []):
+        parts = action.split(":", 1)
+        if len(parts) == 2:
+            title, desc = parts[0].strip(), parts[1].strip()
+            actions_html += f"""
+            <div style="margin-bottom: 12px;">
+              <div style="font-size: 13.5px; line-height: 1.5; color: #CCCCCC;">
+                <span style="color: #22C55E; margin-right: 8px; font-weight: bold;">✔</span>
+                <strong style="color: #FFFFFF;">{title}:</strong> {desc}
+              </div>
+            </div>
+            """
+        else:
+            actions_html += f"""
+            <div style="margin-bottom: 12px;">
+              <div style="font-size: 13.5px; line-height: 1.5; color: #CCCCCC;">
+                <span style="color: #22C55E; margin-right: 8px; font-weight: bold;">✔</span>
+                {action}
+              </div>
+            </div>
+            """
+            
+    # Format activities as beautiful row items
+    activities_html = ""
+    activities = report_data.get("activities", [])
+    if activities:
+        for act in activities:
+            activities_html += f"""
+            <tr style="border-bottom: 1px solid #1C1C1C;">
+              <td style="padding: 12px 8px; font-size: 12.5px; color: #FFFFFF; font-weight: 500;">{act.get('activityName', 'Activity')}</td>
+              <td style="padding: 12px 8px; font-size: 12.5px; color: #888888; text-align: right;">{act.get('distance', 0)} km</td>
+              <td style="padding: 12px 8px; font-size: 12.5px; color: #888888; text-align: right;">{act.get('duration', 0)}m</td>
+              <td style="padding: 12px 8px; font-size: 12.5px; color: #22C55E; font-weight: bold; text-align: right;">{act.get('averageHR', '—')} bpm</td>
+              <td style="padding: 12px 8px; font-size: 12.5px; color: #888888; text-align: right;">{act.get('calories', '—')} cal</td>
+            </tr>
+            """
+    else:
+        activities_html = """
+        <tr>
+          <td colspan="5" style="padding: 24px 8px; font-size: 12px; color: #555555; text-align: center; font-style: italic;">
+            No activities recorded this week.
+          </td>
+        </tr>
+        """
+        
+    # Standard format variables with fallback checks
+    sleep_score = averages.get("sleep_score")
+    sleep_score = int(sleep_score) if sleep_score is not None else "—"
+    sleep_dur = averages.get("sleep_duration") or "—"
+    resting_hr = averages.get("resting_hr")
+    resting_hr = int(resting_hr) if resting_hr is not None else "—"
+    overnight_hrv = averages.get("overnight_hrv")
+    overnight_hrv = int(overnight_hrv) if overnight_hrv is not None else "—"
+    intensity_min = averages.get("weekly_intensity_minutes") or 0
+    steps = averages.get("steps") or "—"
+    if isinstance(steps, float):
+        steps = f"{int(steps):,}"
+    elif isinstance(steps, int):
+        steps = f"{steps:,}"
+        
+    hrv_weekly_avg = averages.get("hrv_weekly_avg") or "—"
+    hrv_weekly_avg = int(hrv_weekly_avg) if isinstance(hrv_weekly_avg, (int, float)) else hrv_weekly_avg
+    hrv_status_val = averages.get("hrv_status") or "N/A"
+    readiness = averages.get("training_readiness") or "N/A"
+
+    html = f"""<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
-  <style>
-    body {{ background-color: #0A0A0A; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; color: #FFFFFF; margin: 0; padding: 40px 20px; }}
-    .container {{ max-width: 600px; margin: 0 auto; background-color: #141414; border: 1px solid #262626; border-radius: 16px; padding: 40px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }}
-    h1 {{ font-size: 26px; font-weight: bold; font-family: "Space Grotesk", sans-serif; letter-spacing: -0.030em; margin: 0 0 8px 0; color: #FFFFFF; line-height: 1.2; }}
-    .badge {{ display: inline-block; background-color: #0F1C15; border: 1px solid #164E2F; padding: 4px 12px; border-radius: 20px; font-size: 10px; color: #22C55E; font-weight: bold; letter-spacing: 0.20em; text-transform: uppercase; margin-bottom: 24px; }}
-    .card {{ background-color: #0A0A0A; border: 1px solid #262626; border-radius: 12px; padding: 24px; margin-bottom: 32px; }}
-    .summary-text {{ font-size: 15px; line-height: 1.6; color: #CCCCCC; margin: 0; }}
-    .btn-container {{ text-align: center; margin: 40px 0; }}
-    .btn {{ display: inline-block; background-color: #22C55E; color: #000000; text-decoration: none; padding: 16px 32px; font-size: 12px; font-weight: bold; letter-spacing: 0.150em; text-transform: uppercase; border-radius: 8px; box-shadow: 0 4px 12px rgba(34,197,94,0.2); font-family: "Space Grotesk", sans-serif; }}
-    .btn:hover {{ background-color: #4ade80; }}
-    .coach-section {{ border-top: 1px solid #262626; padding-top: 24px; margin-top: 32px; }}
-    .coach-title {{ font-size: 11px; text-transform: uppercase; letter-spacing: 0.20em; color: #888888; font-weight: bold; margin-bottom: 8px; }}
-    .coach-take {{ font-size: 13px; line-height: 1.5; color: #BFBFBF; font-style: italic; }}
-    .footer {{ font-size: 10px; color: #444444; text-transform: uppercase; letter-spacing: 0.150em; border-top: 1px solid #262626; padding-top: 16px; margin-top: 40px; text-align: left; }}
-  </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WHOOP-Style Garmin Performance Report</title>
 </head>
-<body>
-  <div class="container">
-    <span class="badge">Performance Report Calibrated</span>
-    <h1>Weekly Recovery & Performance Insights Are Ready</h1>
-    <p style="color: #888; font-size: 12px; margin-top: 0; margin-bottom: 24px;">Week ending {end_date}</p>
+<body style="background-color: #050505; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #FFFFFF; margin: 0; padding: 20px 0; -webkit-font-smoothing: antialiased;">
+  <div style="max-width: 620px; margin: 0 auto; background-color: #0D0D0D; border: 1px solid #1C1C1C; border-radius: 16px; overflow: hidden; box-shadow: 0 20px 50px rgba(0,0,0,0.8);">
     
-    <div class="card">
-      <p class="summary-text">
-        {summary_text}
+    <!-- Top Deco Bar -->
+    <div style="height: 4px; background: linear-gradient(90deg, #22C55E, #10B981, #3B82F6);"></div>
+    
+    <!-- Header -->
+    <div style="padding: 32px 32px 20px 32px; border-bottom: 1px solid #1C1C1C; background-color: #0A0A0A;">
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse;">
+        <tr>
+          <td>
+            <span style="display: inline-block; background-color: rgba(34, 197, 94, 0.1); border: 1px solid rgba(34, 197, 94, 0.3); padding: 5px 12px; border-radius: 20px; font-size: 10px; color: #22C55E; font-weight: bold; letter-spacing: 0.18em; text-transform: uppercase; font-family: monospace;">CALIBRATED PERFORMANCE</span>
+            <h1 style="font-size: 24px; font-weight: 800; letter-spacing: -0.03em; margin: 12px 0 4px 0; color: #FFFFFF; text-transform: uppercase; line-height: 1.2;">Weekly Physiology Summary</h1>
+            <p style="color: #666666; font-size: 12px; margin: 0; font-family: monospace; text-transform: uppercase; letter-spacing: 0.05em;">WEEK ENDING {end_date} &bull; DEVICE: GARMIN REST CONNECT</p>
+          </td>
+        </tr>
+      </table>
+    </div>
+    
+    <!-- Hero Summary Statement -->
+    <div style="padding: 24px 32px; background-color: #070707; border-bottom: 1px solid #1C1C1C;">
+      <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.18em; color: #888888; font-weight: bold; margin-bottom: 8px; font-family: monospace;">AI Physiological assessment</div>
+      <p style="font-size: 14.5px; line-height: 1.6; color: #D1D5DB; margin: 0; font-weight: 400;">
+        {ai_analysis.get('summary', 'Weekly body recovery and active strain metrics parsed successfully. View details below.')}
       </p>
     </div>
 
-    <div class="coach-section" style="margin-bottom: 32px;">
-      <div class="coach-title">Daily Coach Takeaway</div>
-      <div class="coach-take">"{coach_take}"</div>
+    <!-- Coach Executive Takeaway -->
+    <div style="padding: 24px 32px; background-color: #090909; border-bottom: 1px solid #1C1C1C;">
+      <div style="border-left: 3.5px solid #22C55E; padding-left: 16px;">
+        <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.18em; color: #22C55E; font-weight: bold; margin-bottom: 6px; font-family: monospace;">Performance Coach takeaway</div>
+        <p style="font-size: 14px; line-height: 1.5; color: #EEEEEE; font-style: italic; margin: 0; font-weight: 500;">
+          "{ai_analysis.get('coach_take', 'Refining sleep hygiene and aligning active workloads with biometric capacity is highly recommended.')}"
+        </p>
+      </div>
     </div>
 
-    <div class="btn-container">
-      <a href="{dashboard_link}" target="_blank" class="btn">Launch Design Dashboard</a>
+    <!-- WHOOP-Style Key Stat Blocks (Cards Grid inside table) -->
+    <div style="padding: 32px 32px 16px 32px; background-color: #0D0D0D;">
+      <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.18em; color: #888888; font-weight: bold; margin-bottom: 16px; font-family: monospace;">Biometric Performance Indexes</div>
+      
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom: 24px; border-collapse: collapse;">
+        <tr>
+          <!-- Column 1 -->
+          <td width="48%" valign="top">
+            <!-- Card 1: Sleep -->
+            <div style="background-color: #050505; border: 1px solid #1C1C1C; border-radius: 12px; padding: 16px; margin-bottom: 16px;">
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse;">
+                <tr>
+                  <td style="color: #3B82F6; font-size: 10px; font-weight: bold; letter-spacing: 0.12em; text-transform: uppercase; font-family: monospace;">Sleep Index</td>
+                </tr>
+                <tr>
+                  <td style="font-size: 26px; font-weight: 800; color: #FFFFFF; padding: 6px 0 2px 0;">{sleep_score}<span style="font-size: 12px; color: #666; font-weight: normal;"> / 100</span></td>
+                </tr>
+                <tr>
+                  <td style="font-size: 11.5px; color: #888888; font-family: monospace;">Avg: {sleep_dur}</td>
+                </tr>
+              </table>
+            </div>
+            
+            <!-- Card 2: Resting HR -->
+            <div style="background-color: #050505; border: 1px solid #1C1C1C; border-radius: 12px; padding: 16px;">
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse;">
+                <tr>
+                  <td style="color: #EF4444; font-size: 10px; font-weight: bold; letter-spacing: 0.12em; text-transform: uppercase; font-family: monospace;">Resting HR</td>
+                </tr>
+                <tr>
+                  <td style="font-size: 26px; font-weight: 800; color: #FFFFFF; padding: 6px 0 2px 0;">{resting_hr}<span style="font-size: 12px; color: #666; font-weight: normal;"> bpm</span></td>
+                </tr>
+                <tr>
+                  <td style="font-size: 11.5px; color: #888888; font-family: monospace;">Lowest Basal Score</td>
+                </tr>
+              </table>
+            </div>
+          </td>
+          
+          <!-- Column Space -->
+          <td width="4%"></td>
+          
+          <!-- Column 2 -->
+          <td width="48%" valign="top">
+            <!-- Card 3: HRV -->
+            <div style="background-color: #050505; border: 1px solid #1C1C1C; border-radius: 12px; padding: 16px; margin-bottom: 16px;">
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse;">
+                <tr>
+                  <td style="color: #22C55E; font-size: 10px; font-weight: bold; letter-spacing: 0.12em; text-transform: uppercase; font-family: monospace;">Overnight HRV</td>
+                </tr>
+                <tr>
+                  <td style="font-size: 26px; font-weight: 800; color: #FFFFFF; padding: 6px 0 2px 0;">{overnight_hrv}<span style="font-size: 12px; color: #666; font-weight: normal;"> ms</span></td>
+                </tr>
+                <tr>
+                  <td style="font-size: 11.5px; color: #888888; font-family: monospace;">{hrv_status_val} ({hrv_weekly_avg}ms avg)</td>
+                </tr>
+              </table>
+            </div>
+            
+            <!-- Card 4: Load & Movement -->
+            <div style="background-color: #050505; border: 1px solid #1C1C1C; border-radius: 12px; padding: 16px;">
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse;">
+                <tr>
+                  <td style="color: #F59E0B; font-size: 10px; font-weight: bold; letter-spacing: 0.12em; text-transform: uppercase; font-family: monospace;">Weekly Intensity</td>
+                </tr>
+                <tr>
+                  <td style="font-size: 26px; font-weight: 800; color: #FFFFFF; padding: 6px 0 2px 0;">{intensity_min}<span style="font-size: 12px; color: #666; font-weight: normal;"> mins</span></td>
+                </tr>
+                <tr>
+                  <td style="font-size: 11.5px; color: #888888; font-family: monospace;">Avg steps: {steps}/day</td>
+                </tr>
+              </table>
+            </div>
+          </td>
+        </tr>
+      </table>
     </div>
 
-    <div class="footer">
-      Device: Garmin Connect &bull; Workflow: weekly-report.yml &bull; Generated: {end_date}
+    <!-- GRAPHICS SECTIONS (Images of charts) -->
+    <div style="padding: 0 32px 32px 32px; background-color: #0D0D0D;">
+      <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.18em; color: #888888; font-weight: bold; margin-bottom: 16px; font-family: monospace;">Visual Physiological Analytics</div>
+      
+      <!-- Chart 1: Sleep Score -->
+      <div style="background-color: #050505; border: 1px solid #1C1C1C; border-radius: 12px; padding: 16px; margin-bottom: 20px; text-align: center;">
+        <img src="{sleep_chart_url}" alt="Sleep Score Chart" style="max-width: 100%; border-radius: 8px; border: none; outline: none; display: block;" width="556">
+        <div style="font-size: 10px; color: #555555; text-align: left; margin-top: 8px; font-family: monospace; text-transform: uppercase;">Sleep Scores over 7 days. Higher colors represent optimal daily sleep resources.</div>
+      </div>
+      
+      <!-- Chart 2: HRV -->
+      <div style="background-color: #050505; border: 1px solid #1C1C1C; border-radius: 12px; padding: 16px; margin-bottom: 20px; text-align: center;">
+        <img src="{hrv_chart_url}" alt="HRV Chart" style="max-width: 100%; border-radius: 8px; border: none; outline: none; display: block;" width="556">
+        <div style="font-size: 10px; color: #555555; text-align: left; margin-top: 8px; font-family: monospace; text-transform: uppercase;">Overnight HRV variations vs weekly averages. Green indicator represents autonomic index.</div>
+      </div>
+
+      <!-- Chart 3: Body Battery -->
+      <div style="background-color: #050505; border: 1px solid #1C1C1C; border-radius: 12px; padding: 16px; text-align: center;">
+        <img src="{battery_chart_url}" alt="Body Battery Chart" style="max-width: 100%; border-radius: 8px; border: none; outline: none; display: block;" width="556">
+        <div style="font-size: 10px; color: #555555; text-align: left; margin-top: 8px; font-family: monospace; text-transform: uppercase;">Body battery high charge (blue) vs lowest points log representing systemic strain recovery.</div>
+      </div>
     </div>
+
+    <!-- AI ACTIONS / STRATEGIC TAKEAWAYS -->
+    <div style="padding: 32px; background-color: #080808; border-top: 1px solid #1C1C1C; border-bottom: 1px solid #1C1C1C;">
+      <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.18em; color: #22C55E; font-weight: bold; margin-bottom: 20px; font-family: monospace;">Coach Strategic Recommendations</div>
+      
+      <!-- Action Items list -->
+      <div>
+        {actions_html}
+      </div>
+    </div>
+    
+    <!-- DETAILED ACTIVITIES LIST -->
+    <div style="padding: 32px; background-color: #0D0D0D; border-bottom: 1px solid #1C1C1C;">
+      <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.18em; color: #888888; font-weight: bold; margin-bottom: 16px; font-family: monospace;">Workout & Strain Logs</div>
+      
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse; width: 100%;">
+        <thead>
+          <tr style="border-bottom: 2px solid #1C1C1C;">
+            <th align="left" style="padding: 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #666666; font-weight: bold; font-family: monospace;">Workout Name</th>
+            <th align="right" style="padding: 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #666666; font-weight: bold; font-family: monospace;">Distance</th>
+            <th align="right" style="padding: 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #666666; font-weight: bold; font-family: monospace;">Duration</th>
+            <th align="right" style="padding: 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #666666; font-weight: bold; font-family: monospace;">Avg HR</th>
+            <th align="right" style="padding: 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #666666; font-weight: bold; font-family: monospace;">Cals</th>
+          </tr>
+        </thead>
+        <tbody>
+          {activities_html}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Launch CTA Button Block -->
+    <div style="padding: 40px 32px; background-color: #050505; text-align: center;">
+      <p style="font-size: 13px; color: #666666; margin-bottom: 20px; line-height: 1.5;">Review detailed interactive charts, historic telemetry logs, and sleep cycles anytime on your desktop dashboard tracker.</p>
+      <a href="{dashboard_link}" target="_blank" style="display: inline-block; background-color: #22C55E; color: #000000; text-decoration: none; padding: 16px 36px; font-size: 11px; font-weight: bold; letter-spacing: 0.20em; text-transform: uppercase; border-radius: 8px; box-shadow: 0 4px 20px rgba(34,197,94,0.35); font-family: monospace;">LAUNCH DESKTOP DASHBOARD &gt;</a>
+    </div>
+
+    <!-- Footer -->
+    <div style="padding: 24px 32px; background-color: #080808; border-top: 1px solid #1C1C1C; text-align: left;">
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse;">
+        <tr>
+          <td>
+            <div style="font-size: 9px; color: #333333; text-transform: uppercase; letter-spacing: 0.15em; font-family: monospace; line-height: 1.6;">
+              Device Pipeline: Garmin Rest API integrations<br>
+              Processing Engine: Gemini Health assessment Flash Pro<br>
+              Execution workflow: .github/workflows/weekly-report.yml &bull; generated {end_date}<br>
+              Need assistance? Open your interactive dashboard interface.
+            </div>
+          </td>
+        </tr>
+      </table>
+    </div>
+    
   </div>
 </body>
 </html>"""
-
-def send_email(subject, html_body):
-    msg = MIMEMultipart("mixed")
-    msg["Subject"] = subject
-    msg["From"] = env("GMAIL_USER")
-    msg["To"] = env("RECIPIENT_EMAIL")
-
-    msg.attach(MIMEText(html_body, "html"))
-
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
-        s.login(env("GMAIL_USER"), env("GMAIL_APP_PASSWORD"))
-        s.sendmail(env("GMAIL_USER"), env("RECIPIENT_EMAIL"), msg.as_string())
+    return html
 
 # ---------- main ----------
 
 def main():
     end = date.today()
     start = end - timedelta(days=6)
-    print(f"Pulling Garmin data {start} -> {end}")
+    print(f"Pulling Garmin data {{start}} -> {{end}}")
 
     client = login()
     rows = pull_week(client, end)
@@ -320,7 +682,7 @@ def main():
     try:
         activities = client.get_activities_by_date(start.isoformat(), end.isoformat())
     except Exception as e:
-        print(f"Activities pull failed: {e}")
+        print(f"Activities pull failed: {{e}}")
         activities = []
 
     # Build the full structured JSON report
@@ -341,7 +703,7 @@ def main():
         ai_analysis = json.loads(analysis_json_str)
         report_data["ai_analysis"] = ai_analysis
     except Exception as e:
-        print(f"JSON analysis parsing failed: {e}. Raw response: {analysis_json_str}")
+        print(f"JSON analysis parsing failed: {{e}}. Raw response: {{analysis_json_str}}")
         report_data["ai_analysis"] = {
             "summary": "Garmin data and metrics compiled successfully.",
             "sleep": "Review sleep details on the live interactive performance monitor dashboard.",
@@ -353,27 +715,20 @@ def main():
 
     # Save the structured dashboard JSON file locally into "reports" folder so GitHub actions commits it
     os.makedirs("reports", exist_ok=True)
-    report_filename = f"reports/report_{end.isoformat()}.json"
+    report_filename = f"reports/report_{{end.isoformat()}}.json"
     with open(report_filename, "w", encoding="utf-8") as f:
         json.dump(report_data, f, indent=2, ensure_ascii=False)
-    print(f"Saved structured report to {report_filename}")
+    print(f"Saved structured report to {{report_filename}}")
 
     # Build dynamic dashboard url pointing to our Cloud Run container
     # Fallback to hardcoded URL if APP_URL is not set as env var
     app_url = env("APP_URL", "https://ais-pre-wqay2bw7mgjjc6347awiso-43870111567.europe-west1.run.app")
-    dashboard_link = f"{app_url}/?report={end.isoformat()}"
+    dashboard_link = f"{{app_url}}/?report={{end.isoformat()}}"
 
     # Build custom email HTML body
-    summary_text = report_data["ai_analysis"].get("summary", "")
-    coach_take = report_data["ai_analysis"].get("coach_take", "")
-    html_body = HTML_EMAIL_TEMPLATE.format(
-        summary_text=summary_text,
-        coach_take=coach_take,
-        dashboard_link=dashboard_link,
-        end_date=end.isoformat()
-    )
+    html_body = build_enhanced_html_email(report_data, dashboard_link, end.isoformat())
 
-    subject = f"Garmin Weekly Performance Summary — week ending {end.isoformat()}"
+    subject = f"Garmin Weekly Performance Summary — week ending {{end.isoformat()}}"
     send_email(subject, html_body)
     print("Polished summary report email sent successfully!")
 
