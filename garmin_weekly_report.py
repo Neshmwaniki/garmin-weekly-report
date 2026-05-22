@@ -694,14 +694,14 @@ def build_enhanced_html_email(report_data, dashboard_link, end_date):
 def send_email(subject, html_body):
     msg = MIMEMultipart("mixed")
     msg["Subject"] = subject
-    msg["From"] = env("GMAIL_USER")
-    msg["To"] = env("RECIPIENT_EMAIL")
+    msg["From"] = env("GMAIL_USER", "njukidenis47@gmail.com")
+    msg["To"] = env("RECIPIENT_EMAIL", "njukidenis47@gmail.com")
 
     msg.attach(MIMEText(html_body, "html"))
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
-        s.login(env("GMAIL_USER"), env("GMAIL_APP_PASSWORD"))
-        s.sendmail(env("GMAIL_USER"), env("RECIPIENT_EMAIL"), msg.as_string())
+        s.login(env("GMAIL_USER", "njukidenis47@gmail.com"), env("GMAIL_APP_PASSWORD"))
+        s.sendmail(env("GMAIL_USER", "njukidenis47@gmail.com"), env("RECIPIENT_EMAIL", "njukidenis47@gmail.com"), msg.as_string())
 
 # ---------- main ----------
 
