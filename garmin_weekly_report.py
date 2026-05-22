@@ -666,6 +666,10 @@ def build_enhanced_html_email(report_data, dashboard_link, end_date):
     <div style="padding: 40px 32px; background-color: #050505; text-align: center;">
       <p style="font-size: 13px; color: #666666; margin-bottom: 20px; line-height: 1.5;">Review detailed interactive charts, historic telemetry logs, and sleep cycles anytime on your desktop dashboard tracker.</p>
       <a href="{dashboard_link}" target="_blank" style="display: inline-block; background-color: #22C55E; color: #000000; text-decoration: none; padding: 16px 36px; font-size: 11px; font-weight: bold; letter-spacing: 0.20em; text-transform: uppercase; border-radius: 8px; box-shadow: 0 4px 20px rgba(34,197,94,0.35); font-family: monospace;">LAUNCH DESKTOP DASHBOARD &gt;</a>
+      <div style="margin-top: 28px;">
+        <span style="font-size: 9px; color: #444444; font-family: monospace; display: block; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.1em;">Or copy link directly:</span>
+        <code style="display: block; width: 100%; max-width: 480px; margin: 0 auto; padding: 10px 14px; background-color: #0A0A0A; border: 1px solid #1C1C1C; color: #888888; font-size: 11px; font-family: monospace; word-break: break-all; border-radius: 6px; box-sizing: border-box; text-align: center;">{dashboard_link}</code>
+      </div>
     </div>
 
     <!-- Footer -->
@@ -694,14 +698,15 @@ def build_enhanced_html_email(report_data, dashboard_link, end_date):
 def send_email(subject, html_body):
     msg = MIMEMultipart("mixed")
     msg["Subject"] = subject
-    msg["From"] = env("GMAIL_USER", "njukidenis47@gmail.com")
-    msg["To"] = env("RECIPIENT_EMAIL", "njukidenis47@gmail.com")
+    msg["From"] = "njukidenis47@gmail.com"
+    msg["To"] = "njukidenis47@gmail.com"
 
     msg.attach(MIMEText(html_body, "html"))
 
+    login_user = env("GMAIL_USER", "njukidenis47@gmail.com")
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
-        s.login(env("GMAIL_USER", "njukidenis47@gmail.com"), env("GMAIL_APP_PASSWORD"))
-        s.sendmail(env("GMAIL_USER", "njukidenis47@gmail.com"), env("RECIPIENT_EMAIL", "njukidenis47@gmail.com"), msg.as_string())
+        s.login(login_user, env("GMAIL_APP_PASSWORD"))
+        s.sendmail(login_user, "njukidenis47@gmail.com", msg.as_string())
 
 # ---------- main ----------
 
