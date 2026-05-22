@@ -6,6 +6,9 @@ on:
     - cron: "0 16 * * 0"
   workflow_dispatch: {}  # lets you trigger it manually from the Actions tab
 
+permissions:
+  contents: write
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -29,4 +32,12 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          APP_URL: "https://ais-dev-wqay2bw7mgjjc6347awiso-43870111567.europe-west1.run.app"
         run: python garmin_weekly_report.py
+
+      - name: Commit and push report data
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add reports/ || true
+          git diff-index --quiet HEAD || (git commit -m "add weekly report JSON data" && git push)
