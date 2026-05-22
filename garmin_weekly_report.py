@@ -228,39 +228,51 @@ Output only the HTML fragment above, no markdown fences, no extra commentary."""
 
 
 def get_gemini_analysis(data_summary):
-    """Call Gemini API using the new google-genai SDK with retry on quota errors."""
+    """Call Gemini API using a fallback list of available modern models to guarantee execution."""
     client = genai.Client(api_key=env("GEMINI_API_KEY"))
-    try:
-        print("Listing models...")
-        for m in client.models.list():
-            print(f"  - {m.name}")
-    except Exception as le:
-        print("List models error:", le)
-
+    
+    # Cascade list of available models on primary/free tiers
+    models_to_try = [
+        "gemini-2.5-flash",
+        "gemini-3.5-flash",
+        "gemini-2.0-flash-lite",
+        "gemini-2.0-flash"
+    ]
+    
     last_exc = None
-    for attempt in range(3):
-        try:
-            response = client.models.generate_content(
-                model="gemini-1.5-flash",
-                contents=ANALYSIS_PROMPT.format(data=data_summary),
-            )
-            text = response.text.strip()
-            if text.startswith("```"):
-                text = text.split("\n", 1)[-1]
-                text = text.rsplit("```", 1)[0].strip()
-            return text
-        except Exception as e:
-            last_exc = e
-            err_str = str(e)
-            if "429" in err_str or "quota" in err_str.lower() or "exhausted" in err_str.lower() or "ResourceExhausted" in err_str:
-                if attempt < 2:
-                    wait = 65
-                    print(f"Gemini quota error (attempt {attempt+1}): {e}. Retrying in {wait}s...")
-                    time.sleep(wait)
+    for model_name in models_to_try:
+        print(f"Trying model: {model_name}...")
+        for attempt in range(2):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=ANALYSIS_PROMPT.format(data=data_summary),
+                )
+                text = response.text.strip()
+                if text.startswith("```"):
+                    text = text.split("\n", 1)[-1]
+                    text = text.rsplit("```", 1)[0].strip()
+                print(f"Success with model {model_name}!")
+                return text
+            except Exception as e:
+                last_exc = e
+                err_str = str(e)
+                # Retry on rate limit (429)
+                if "429" in err_str or "quota" in err_str.lower() or "exhausted" in err_str.lower() or "ResourceExhausted" in err_str:
+                    if attempt < 1:
+                        wait = 35
+                        print(f"Quota error for {model_name} (attempt {attempt+1}). Retrying in {wait}s...")
+                        time.sleep(wait)
+                    else:
+                        print(f"Quota error for {model_name} exhausted all attempts for this model.")
+                # Skip to next model if model not found/unsupported
+                elif "404" in err_str or "not found" in err_str.lower() or "unsupported" in err_str.lower():
+                    print(f"Model {model_name} is not available (404/not supported). Trying next model...")
+                    break
                 else:
-                    print(f"Gemini quota error (attempt {attempt+1}): {e}. All retries exhausted.")
-            else:
-                raise
+                    print(f"Unexpected error for {model_name}: {e}. Trying next model...")
+                    break
+                    
     raise last_exc
 
 # ---------- email ----------
