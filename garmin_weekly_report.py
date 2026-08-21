@@ -26,7 +26,7 @@ from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
 
-import google.generativeai as genai
+from google import genai
 from garminconnect import (
     Garmin,
     GarminConnectAuthenticationError,
@@ -261,16 +261,33 @@ Tone rules:
 """
 
 
+# Tried in order; gemini-1.5-flash (the old default here) was retired in Sept 2025.
+# Keeping a short fallback list so a single model retirement doesn't break the
+# whole pipeline again — if the first one 404s/is unavailable, we try the next.
+GEMINI_MODEL_FALLBACKS = ["gemini-3.7-flash", "gemini-2.5-flash"]
+
+
 def get_gemini_analysis(data_summary: str) -> str:
-    genai.configure(api_key=env("GEMINI_API_KEY"))
-    model = genai.GenerativeModel("gemini-1.5-flash")
-    response = model.generate_content(ANALYSIS_PROMPT.format(data=data_summary))
-    # Strip markdown code fences if Gemini wraps the HTML
-    text = response.text.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1]
-        text = text.rsplit("```", 1)[0].strip()
-    return text
+    client = genai.Client(api_key=env("GEMINI_API_KEY"))
+
+    last_error = None
+    for model_name in GEMINI_MODEL_FALLBACKS:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=ANALYSIS_PROMPT.format(data=data_summary),
+            )
+            text = response.text.strip()
+            # Strip markdown code fences if Gemini wraps the HTML
+            if text.startswith("```"):
+                text = text.split("\n", 1)[-1]
+                text = text.rsplit("```", 1)[0].strip()
+            return text
+        except Exception as e:
+            print(f"  Gemini model '{model_name}' failed: {e}")
+            last_error = e
+
+    sys.exit(f"All Gemini models failed. Last error: {last_error}")
 
 
 # ---------- email ----------
