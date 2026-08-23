@@ -32,14 +32,13 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          APP_URL: "https://ais-dev-wqay2bw7mgjjc6347awiso-43870111567.europe-west1.run.app"
         run: python garmin_weekly_report.py
 
-      - name: Publish report to GitHub Pages
+      - name: Publish dashboard & save weekly memory
         run: |
           cp report.html index.html
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add index.html
+          git add index.html reports/
           git diff --staged --quiet || git commit -m "chore: weekly report $(date -u +%Y-%m-%d) [skip ci]"
           git push
