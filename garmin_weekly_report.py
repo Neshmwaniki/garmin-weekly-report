@@ -77,6 +77,16 @@ def r1(v):
     return round(v, 1) if isinstance(v, (int, float)) else v
 
 
+def daily_hrv(row: dict):
+    """HRV for one day, preferring the nightly overnight reading but falling
+    back to Garmin's own rolling weekly average when the nightly figure is
+    missing (avgOvernightHrv isn't populated for every device/night, but
+    hrvSummary.weeklyAvg reliably is) — so a gap in one source doesn't blank
+    out the whole week."""
+    v = row.get("avg_overnight_hrv")
+    return v if v is not None else row.get("hrv_weekly_avg")
+
+
 # ---------- Garmin pulls ----------
 
 def login() -> Garmin:
@@ -207,13 +217,16 @@ def compute_averages(rows) -> dict:
         vals = [r[field] for r in rows if r.get(field) is not None]
         return sum(vals) if vals else None
 
+    hrv_vals = [daily_hrv(r) for r in rows if daily_hrv(r) is not None]
+    overnight_hrv = round(sum(hrv_vals) / len(hrv_vals), 1) if hrv_vals else None
+
     return {
         "sleep_score": avg("sleep_score"),
         "sleep_duration": seconds_to_hm(avg("sleep_seconds")),
         "deep_sleep": seconds_to_hm(avg("deep_seconds")),
         "rem_sleep": seconds_to_hm(avg("rem_seconds")),
         "resting_hr": avg("resting_hr"),
-        "overnight_hrv": avg("avg_overnight_hrv"),
+        "overnight_hrv": overnight_hrv,
         "steps": avg("steps"),
         "avg_stress": avg("avg_stress"),
         "body_battery_high": avg("body_battery_high"),
@@ -421,7 +434,7 @@ def get_chart_url(config: dict) -> str:
 def build_email_chart_url(rows: list) -> str:
     weekdays = [r.get("weekday", "") for r in rows]
     sleep_scores = [r.get("sleep_score") or 0 for r in rows]
-    hrv_values = [r.get("avg_overnight_hrv") or 0 for r in rows]
+    hrv_values = [daily_hrv(r) or 0 for r in rows]
     config = {
         "type": "bar",
         "data": {
@@ -909,7 +922,7 @@ def main():
         "daily_breakdown": [
             {
                 "date": r["date"], "weekday": r["weekday"], "sleep_score": r.get("sleep_score"),
-                "resting_hr": r.get("resting_hr"), "hrv": r.get("avg_overnight_hrv"),
+                "resting_hr": r.get("resting_hr"), "hrv": daily_hrv(r),
                 "stress": r.get("avg_stress"), "steps": r.get("steps"),
             }
             for r in rows
