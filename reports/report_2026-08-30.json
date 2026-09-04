@@ -221,7 +221,7 @@
     "deep_sleep": "0h 45m",
     "rem_sleep": "0h 41m",
     "resting_hr": 48.4,
-    "overnight_hrv": null,
+    "overnight_hrv": 83.7,
     "steps": 12365.6,
     "avg_stress": 26.3,
     "body_battery_high": 85.7,
